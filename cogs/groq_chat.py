@@ -18,6 +18,7 @@ from groq import Groq
 MAX_RECENT_TURNS = 4
 SUMMARY_TRIGGER = 6
 MAX_SUMMARY_CHARS = 700
+MAX_TOOL_ROUNDS = 3
 MODEL_NAME = "openai/gpt-oss-120b"
 
 
@@ -243,31 +244,6 @@ class GroqChat(commands.Cog):
             return generate_image(arguments.get("prompt", ""))
         return f"Tool {name} tidak dikenal."
 
-    def _tool_choice_for(self, question: str) -> str | dict:
-        """Paksa tool yang tepat untuk intent yang jelas agar Groq tidak salah membaca tool_choice."""
-        normalized = question.lower()
-        if any(keyword in normalized for keyword in (
-            "cuaca", "berita", "terbaru", "hari ini", "sekarang", "cari di web",
-            "search web", "informasi terbaru",
-        )):
-            tool_name = "search_web"
-        elif any(keyword in normalized for keyword in (
-            "buat gambar", "buatkan gambar", "generate image", "gambar ai",
-            "ilustrasi", "lukiskan",
-        )):
-            tool_name = "generate_image"
-        elif any(keyword in normalized for keyword in (
-            "hitung", "kalkulasi", "jalankan python", "kode python", "analisis data",
-        )):
-            tool_name = "run_python_code"
-        else:
-            return "auto"
-
-        return {
-            "type": "function",
-            "function": {"name": tool_name},
-        }
-
     async def _ask_groq(self, user_id: int, question: str, reply_context: str | None = None) -> str:
         if not self.groq.api_key:
             return "GROQ_API_KEY belum diatur. Isi variabel environment tersebut di Railway atau file .env."
@@ -289,56 +265,66 @@ class GroqChat(commands.Cog):
             {"role": "user", "content": prompt},
         ]
 
+        tools = self._tool_definitions()
+
         try:
-            response = self.groq.chat.completions.create(
-                model=MODEL_NAME,
-                messages=messages,
-                tools=self._tool_definitions(),
-                tool_choice=self._tool_choice_for(question),
-                temperature=0.4,
-                max_tokens=500,
-            )
-            assistant_message = response.choices[0].message
-            tool_calls = assistant_message.tool_calls or []
+            for _ in range(MAX_TOOL_ROUNDS):
+                response = self.groq.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=messages,
+                    tools=tools,
+                    tool_choice="auto",
+                    temperature=0.4,
+                    max_tokens=500,
+                )
+                assistant_message = response.choices[0].message
+                tool_calls = assistant_message.tool_calls or []
 
-            if not tool_calls:
-                content = (assistant_message.content or "").strip()
-                return content or "Saya tidak punya jawaban yang jelas untuk itu."
+                if not tool_calls:
+                    content = (assistant_message.content or "").strip()
+                    return content or "Saya tidak punya jawaban yang jelas untuk itu."
 
-            tool_call_payloads = []
-            for call in tool_calls:
-                tool_call_payloads.append({
-                    "id": call.id,
-                    "type": call.type,
-                    "function": {
-                        "name": call.function.name,
-                        "arguments": call.function.arguments,
-                    },
-                })
-
-            messages.append({
-                "role": "assistant",
-                "content": assistant_message.content or "",
-                "tool_calls": tool_call_payloads,
-            })
-
-            for call in tool_calls:
-                args = json.loads(call.function.arguments)
-                result = self._tool_executor(call.function.name, args)
                 messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": str(result),
+                    "role": "assistant",
+                    "content": assistant_message.content or "",
+                    "tool_calls": [
+                        {
+                            "id": call.id,
+                            "type": call.type,
+                            "function": {
+                                "name": call.function.name,
+                                "arguments": call.function.arguments,
+                            },
+                        }
+                        for call in tool_calls
+                    ],
                 })
 
-            final_response = self.groq.chat.completions.create(
+                for call in tool_calls:
+                    try:
+                        arguments = json.loads(call.function.arguments)
+                        if not isinstance(arguments, dict):
+                            raise ValueError("Argumen tool harus berupa object JSON.")
+                        result = self._tool_executor(call.function.name, arguments)
+                    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                        result = f"Tool gagal dijalankan: {exc}"
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": str(result),
+                    })
+
+            forced_response = self.groq.chat.completions.create(
                 model=MODEL_NAME,
                 messages=messages,
+                tools=tools,
+                tool_choice="none",
                 temperature=0.4,
                 max_tokens=500,
             )
-            final_text = (final_response.choices[0].message.content or "").strip()
-            return final_text or "Saya sudah menjalankan tool, tetapi tidak ada ringkasan final yang dikembalikan."
+            forced_text = (forced_response.choices[0].message.content or "").strip()
+            return forced_text or "Saya sudah menjalankan tool, tetapi tidak ada ringkasan final yang dikembalikan."
         except Exception as exc:
             return f"Gagal menghubungi Groq: {exc}"
 
@@ -358,6 +344,41 @@ class GroqChat(commands.Cog):
         if referenced_message.author == self.bot.user:
             return referenced_message.content.strip()
         return None
+
+    @staticmethod
+    def _split_message(text: str, limit: int = 2000) -> list[str]:
+        if len(text) <= limit:
+            return [text]
+
+        chunks = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= limit:
+                chunks.append(remaining)
+                break
+
+            split_at = remaining.rfind("\n", 0, limit + 1)
+            if split_at <= 0:
+                split_at = limit
+            else:
+                split_at += 1
+            chunks.append(remaining[:split_at])
+            remaining = remaining[split_at:]
+        return chunks
+
+    async def _send_answer(self, send, answer: str) -> None:
+        if "https://image.pollinations.ai/" in answer:
+            embed = discord.Embed(
+                title="Hasil gambar AI",
+                description="Berikut hasil gambar yang diminta.",
+                color=discord.Color.blurple(),
+            )
+            embed.set_image(url=answer)
+            await send(embed=embed)
+            return
+
+        for chunk in self._split_message(answer):
+            await send(chunk)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -393,19 +414,7 @@ class GroqChat(commands.Cog):
             return
 
         answer = await self._ask_groq(message.author.id, question, reply_context)
-
-        if "https://image.pollinations.ai/" in answer:
-            embed = discord.Embed(
-                title="Hasil gambar AI",
-                description="Berikut hasil gambar yang diminta.",
-                color=discord.Color.blurple(),
-            )
-            embed.set_image(url=answer)
-            await message.reply(embed=embed)
-            await self._remember(message.author.id, question, answer[:1000])
-            return
-
-        await message.reply(answer[:2000])
+        await self._send_answer(message.reply, answer)
         await self._remember(message.author.id, question, answer[:1000])
 
     @app_commands.command(name="ask-groq", description="Tanya Groq dengan konteks ringkas per user.")
@@ -413,18 +422,7 @@ class GroqChat(commands.Cog):
     async def ask_groq(self, interaction: discord.Interaction, question: str) -> None:
         await interaction.response.defer()
         answer = await self._ask_groq(interaction.user.id, question)
-
-        if "https://image.pollinations.ai/" in answer:
-            embed = discord.Embed(
-                title="Hasil gambar AI",
-                description="Berikut hasil gambar yang diminta.",
-                color=discord.Color.blurple(),
-            )
-            embed.set_image(url=answer)
-            await interaction.followup.send(embed=embed)
-        else:
-            await interaction.followup.send(answer[:2000])
-
+        await self._send_answer(interaction.followup.send, answer)
         await self._remember(interaction.user.id, question, answer[:1000])
 
     @commands.command(name="ask-groq")
@@ -435,18 +433,7 @@ class GroqChat(commands.Cog):
 
         reply_context = await self._resolve_reply_context(ctx.message)
         answer = await self._ask_groq(ctx.author.id, question, reply_context)
-
-        if "https://image.pollinations.ai/" in answer:
-            embed = discord.Embed(
-                title="Hasil gambar AI",
-                description="Berikut hasil gambar yang diminta.",
-                color=discord.Color.blurple(),
-            )
-            embed.set_image(url=answer)
-            await ctx.reply(embed=embed)
-        else:
-            await ctx.reply(answer[:2000])
-
+        await self._send_answer(ctx.reply, answer)
         await self._remember(ctx.author.id, question, answer[:1000])
 
     @commands.command(name="groq")

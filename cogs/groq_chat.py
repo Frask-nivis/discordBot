@@ -243,6 +243,31 @@ class GroqChat(commands.Cog):
             return generate_image(arguments.get("prompt", ""))
         return f"Tool {name} tidak dikenal."
 
+    def _tool_choice_for(self, question: str) -> str | dict:
+        """Paksa tool yang tepat untuk intent yang jelas agar Groq tidak salah membaca tool_choice."""
+        normalized = question.lower()
+        if any(keyword in normalized for keyword in (
+            "cuaca", "berita", "terbaru", "hari ini", "sekarang", "cari di web",
+            "search web", "informasi terbaru",
+        )):
+            tool_name = "search_web"
+        elif any(keyword in normalized for keyword in (
+            "buat gambar", "buatkan gambar", "generate image", "gambar ai",
+            "ilustrasi", "lukiskan",
+        )):
+            tool_name = "generate_image"
+        elif any(keyword in normalized for keyword in (
+            "hitung", "kalkulasi", "jalankan python", "kode python", "analisis data",
+        )):
+            tool_name = "run_python_code"
+        else:
+            return "auto"
+
+        return {
+            "type": "function",
+            "function": {"name": tool_name},
+        }
+
     async def _ask_groq(self, user_id: int, question: str, reply_context: str | None = None) -> str:
         if not self.groq.api_key:
             return "GROQ_API_KEY belum diatur. Isi variabel environment tersebut di Railway atau file .env."
@@ -269,7 +294,7 @@ class GroqChat(commands.Cog):
                 model=MODEL_NAME,
                 messages=messages,
                 tools=self._tool_definitions(),
-                tool_choice="auto",
+                tool_choice=self._tool_choice_for(question),
                 temperature=0.4,
                 max_tokens=500,
             )

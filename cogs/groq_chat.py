@@ -1,8 +1,17 @@
+import json
+import math
 import os
+import random
+import statistics
+import urllib.parse
+from contextlib import redirect_stdout
+from datetime import datetime
+from io import StringIO
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+from duckduckgo_search import DDGS
 from groq import Groq
 
 
@@ -10,6 +19,77 @@ MAX_RECENT_TURNS = 4
 SUMMARY_TRIGGER = 6
 MAX_SUMMARY_CHARS = 700
 MODEL_NAME = "openai/gpt-oss-120b"
+
+
+def search_web(query: str) -> str:
+    if not query.strip():
+        return "Query pencarian kosong."
+
+    try:
+        with DDGS() as ddgs:
+            results = ddgs.text(query, max_results=3)
+    except Exception as exc:
+        return f"Gagal mencari web: {exc}"
+
+    if not results:
+        return "Tidak ada hasil pencarian yang relevan."
+
+    lines = []
+    for item in results:
+        title = item.get("title") or "Hasil pencarian"
+        url = item.get("href") or item.get("url") or ""
+        snippet = item.get("body") or item.get("snippet") or ""
+        lines.append(f"- {title}: {url}\n  {snippet}")
+    return "\n\n".join(lines)
+
+
+def run_python_code(code: str) -> str:
+    safe_builtins = {
+        "abs": abs,
+        "bool": bool,
+        "dict": dict,
+        "enumerate": enumerate,
+        "float": float,
+        "int": int,
+        "len": len,
+        "list": list,
+        "max": max,
+        "min": min,
+        "pow": pow,
+        "print": print,
+        "range": range,
+        "round": round,
+        "set": set,
+        "sorted": sorted,
+        "str": str,
+        "sum": sum,
+        "tuple": tuple,
+    }
+    safe_globals = {
+        "__builtins__": safe_builtins,
+        "datetime": datetime,
+        "math": math,
+        "random": random,
+        "statistics": statistics,
+    }
+
+    output_buffer = StringIO()
+    try:
+        with redirect_stdout(output_buffer):
+            exec(code, safe_globals, {})
+    except Exception as exc:
+        return f"Error: {exc}"
+
+    text = output_buffer.getvalue().strip()
+    return text if text else "Kode berhasil dijalankan tanpa output."
+
+
+def generate_image(prompt: str) -> str:
+    encoded_prompt = urllib.parse.quote(prompt.strip())
+    return (
+        "https://image.pollinations.ai/prompt/"
+        f"{encoded_prompt}?width=1024&height=1024&nologo=true"
+    )
 
 
 class UserHistory:
@@ -102,7 +182,66 @@ class GroqChat(commands.Cog):
                 history.recent = history.recent[-3:]
 
     def _trim_question(self, text: str) -> str:
-        return text.strip().replace("!ask-groq", "", 1).strip()
+        normalized = text.strip()
+        for prefix in ("!ask-groq", "!groq"):
+            if normalized.lower().startswith(prefix):
+                return normalized[len(prefix):].strip()
+        return normalized
+
+    def _tool_definitions(self) -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": "Cari informasi terbaru atau fakta dari web untuk pertanyaan yang membutuhkan data terkini.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Kata kunci pencarian web."},
+                        },
+                        "required": ["query"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "run_python_code",
+                    "description": "Jalankan kode Python untuk kalkulasi, analisis data, atau manipulasi angka.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "code": {"type": "string", "description": "Kode Python yang akan dijalankan."},
+                        },
+                        "required": ["code"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "generate_image",
+                    "description": "Buat gambar berdasarkan deskripsi prompt visual.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string", "description": "Deskripsi prompt gambar."},
+                        },
+                        "required": ["prompt"],
+                    },
+                },
+            },
+        ]
+
+    def _tool_executor(self, name: str, arguments: dict) -> str:
+        if name == "search_web":
+            return search_web(arguments.get("query", ""))
+        if name == "run_python_code":
+            return run_python_code(arguments.get("code", ""))
+        if name == "generate_image":
+            return generate_image(arguments.get("prompt", ""))
+        return f"Tool {name} tidak dikenal."
 
     async def _ask_groq(self, user_id: int, question: str, reply_context: str | None = None) -> str:
         if not self.groq.api_key:
@@ -111,32 +250,89 @@ class GroqChat(commands.Cog):
         history = self._history_for(user_id)
         prompt = history.build_context(question, reply_context)
 
+        system_prompt = (
+            "Kamu adalah asisten Discord yang cerdas, ramah, dan ringkas. "
+            "Gunakan tool bila perlu: search_web untuk berita atau fakta terbaru; "
+            "run_python_code untuk kalkulasi atau analisis data; "
+            "generate_image untuk permintaan gambar. "
+            "Jangan pakai tool untuk pertanyaan umum yang bisa dijawab tanpa alat. "
+            "Jika kamu menggunakan tool, jelaskan hasilnya secara jelas dan singkat."
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
         try:
             response = self.groq.chat.completions.create(
                 model=MODEL_NAME,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Kamu adalah asisten yang ringkas, jelas, dan berguna. "
-                            "Gunakan ringkasan percakapan sebelumnya jika ada, tapi tetap fokus "
-                            "pada pertanyaan terbaru. Jangan bertele-tele."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    },
-                ],
-                temperature=0.7,
-                max_tokens=300,
+                messages=messages,
+                tools=self._tool_definitions(),
+                tool_choice="auto",
+                temperature=0.4,
+                max_tokens=500,
             )
-            answer = (response.choices[0].message.content or "").strip()
-            if not answer:
-                return "Groq tidak mengembalikan jawaban. Coba ulang pertanyaan lain."
-            return answer
+            assistant_message = response.choices[0].message
+            tool_calls = assistant_message.tool_calls or []
+
+            if not tool_calls:
+                content = (assistant_message.content or "").strip()
+                return content or "Saya tidak punya jawaban yang jelas untuk itu."
+
+            tool_call_payloads = []
+            for call in tool_calls:
+                tool_call_payloads.append({
+                    "id": call.id,
+                    "type": call.type,
+                    "function": {
+                        "name": call.function.name,
+                        "arguments": call.function.arguments,
+                    },
+                })
+
+            messages.append({
+                "role": "assistant",
+                "content": assistant_message.content or "",
+                "tool_calls": tool_call_payloads,
+            })
+
+            for call in tool_calls:
+                args = json.loads(call.function.arguments)
+                result = self._tool_executor(call.function.name, args)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": str(result),
+                })
+
+            final_response = self.groq.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=0.4,
+                max_tokens=500,
+            )
+            final_text = (final_response.choices[0].message.content or "").strip()
+            return final_text or "Saya sudah menjalankan tool, tetapi tidak ada ringkasan final yang dikembalikan."
         except Exception as exc:
             return f"Gagal menghubungi Groq: {exc}"
+
+    async def _resolve_reply_context(self, message: discord.Message) -> str | None:
+        if message.reference is None:
+            return None
+
+        resolved = message.reference.resolved
+        if isinstance(resolved, discord.Message) and resolved.author == self.bot.user:
+            return resolved.content.strip()
+
+        try:
+            referenced_message = await message.channel.fetch_message(message.reference.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+
+        if referenced_message.author == self.bot.user:
+            return referenced_message.content.strip()
+        return None
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -147,11 +343,7 @@ class GroqChat(commands.Cog):
         if not content:
             return
 
-        reply_context = None
-        if message.reference is not None:
-            resolved = message.reference.resolved
-            if isinstance(resolved, discord.Message) and resolved.author == self.bot.user:
-                reply_context = resolved.content.strip()
+        reply_context = await self._resolve_reply_context(message)
 
         mention_id = self.bot.user.id if self.bot.user else None
         has_mention = (
@@ -160,11 +352,12 @@ class GroqChat(commands.Cog):
             )
         )
 
-        if not (reply_context or has_mention or content.lower().startswith("!ask-groq")):
+        command_prefixes = ("!ask-groq", "!groq")
+        if not (reply_context or has_mention or content.lower().startswith(command_prefixes)):
             return
 
         question = content
-        if content.lower().startswith("!ask-groq"):
+        if content.lower().startswith(command_prefixes):
             question = self._trim_question(content)
         elif has_mention:
             if mention_id is not None:
@@ -175,7 +368,19 @@ class GroqChat(commands.Cog):
             return
 
         answer = await self._ask_groq(message.author.id, question, reply_context)
-        sent = await message.reply(answer[:2000])
+
+        if "https://image.pollinations.ai/" in answer:
+            embed = discord.Embed(
+                title="Hasil gambar AI",
+                description="Berikut hasil gambar yang diminta.",
+                color=discord.Color.blurple(),
+            )
+            embed.set_image(url=answer)
+            await message.reply(embed=embed)
+            await self._remember(message.author.id, question, answer[:1000])
+            return
+
+        await message.reply(answer[:2000])
         await self._remember(message.author.id, question, answer[:1000])
 
     @app_commands.command(name="ask-groq", description="Tanya Groq dengan konteks ringkas per user.")
@@ -183,8 +388,45 @@ class GroqChat(commands.Cog):
     async def ask_groq(self, interaction: discord.Interaction, question: str) -> None:
         await interaction.response.defer()
         answer = await self._ask_groq(interaction.user.id, question)
-        await interaction.followup.send(answer[:2000])
+
+        if "https://image.pollinations.ai/" in answer:
+            embed = discord.Embed(
+                title="Hasil gambar AI",
+                description="Berikut hasil gambar yang diminta.",
+                color=discord.Color.blurple(),
+            )
+            embed.set_image(url=answer)
+            await interaction.followup.send(embed=embed)
+        else:
+            await interaction.followup.send(answer[:2000])
+
         await self._remember(interaction.user.id, question, answer[:1000])
+
+    @commands.command(name="ask-groq")
+    async def ask_groq_text(self, ctx: commands.Context, *, question: str) -> None:
+        if not question.strip():
+            await ctx.reply("Tulis pertanyaan setelah `!ask-groq`.")
+            return
+
+        reply_context = await self._resolve_reply_context(ctx.message)
+        answer = await self._ask_groq(ctx.author.id, question, reply_context)
+
+        if "https://image.pollinations.ai/" in answer:
+            embed = discord.Embed(
+                title="Hasil gambar AI",
+                description="Berikut hasil gambar yang diminta.",
+                color=discord.Color.blurple(),
+            )
+            embed.set_image(url=answer)
+            await ctx.reply(embed=embed)
+        else:
+            await ctx.reply(answer[:2000])
+
+        await self._remember(ctx.author.id, question, answer[:1000])
+
+    @commands.command(name="groq")
+    async def groq_text(self, ctx: commands.Context, *, question: str) -> None:
+        await self.ask_groq_text(ctx, question=question)
 
 
 async def setup(bot: commands.Bot) -> None:

@@ -19,6 +19,7 @@ logger = logging.getLogger("discord_bot")
 class DiscordBot(commands.Bot):
 	def __init__(self) -> None:
 		intents = discord.Intents.default()
+		intents.message_content = True
 		intents.members = os.getenv("DISCORD_MEMBERS_INTENT", "false").lower() == "true"
 		super().__init__(command_prefix=commands.when_mentioned, intents=intents)
 

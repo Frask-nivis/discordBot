@@ -25,6 +25,7 @@ class DiscordBot(commands.Bot):
 	async def setup_hook(self) -> None:
 		await self.load_extension("cogs.ping")
 		await self.load_extension("cogs.random_person")
+		await self.load_extension("cogs.groq_chat")
 		synced_commands = await self.tree.sync()
 		logger.info("Synchronized %d application command(s)", len(synced_commands))
 

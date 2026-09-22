@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -173,8 +174,28 @@ class GroqChatTests(unittest.TestCase):
         cog = GroqChat.__new__(GroqChat)
 
         self.assertIn("hanya tersedia di server", cog._list_roles(None))
+        self.assertIn("hanya tersedia di server", cog._list_members(None))
         result = asyncio.run(cog._manage_member_role(None, None, {}))
         self.assertIn("hanya tersedia di server", result)
+
+    def test_member_lookup_returns_id_and_mention(self):
+        role = SimpleNamespace(id=20, is_default=lambda: False)
+        member = SimpleNamespace(
+            id=10,
+            mention="<@10>",
+            name="taniki",
+            display_name="Taniki",
+            bot=False,
+            roles=[role],
+        )
+        guild = SimpleNamespace(members=[member])
+        cog = GroqChat.__new__(GroqChat)
+
+        result = json.loads(cog._list_members(guild, "<@10>"))
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["members"][0]["id"], 10)
+        self.assertEqual(result["members"][0]["mention"], "<@10>")
 
     def test_text_attachment_extraction_is_bounded(self):
         result = _extract_attachment_bytes(

@@ -41,6 +41,7 @@ BOT_OWNER_IDS = {
 }
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_ATTACHMENT_TEXT_CHARS = 12000
+MAX_MEMBER_RESULTS = 50
 
 
 @dataclass(frozen=True)
@@ -407,6 +408,50 @@ class GroqChat(commands.Cog):
         ]
         return json.dumps({"roles": roles}, ensure_ascii=False)
 
+    def _list_members(self, guild: discord.Guild | None, query: str = "") -> str:
+        if guild is None:
+            return json.dumps({"error": "Tool member hanya tersedia di server."})
+
+        normalized_query = query.strip().lower()
+        mention_id = re.fullmatch(r"<@!?(\d+)>", normalized_query)
+        if mention_id:
+            normalized_query = mention_id.group(1)
+        members = list(guild.members)
+        if normalized_query:
+            members = [
+                member
+                for member in members
+                if (
+                    normalized_query in str(member.id)
+                    or normalized_query in member.name.lower()
+                    or normalized_query in member.display_name.lower()
+                    or normalized_query in str(member).lower()
+                    or normalized_query in member.mention
+                )
+            ]
+
+        members.sort(key=lambda member: (member.bot, member.display_name.lower(), member.id))
+        results = [
+            {
+                "id": member.id,
+                "mention": member.mention,
+                "username": member.name,
+                "display_name": member.display_name,
+                "bot": member.bot,
+                "role_ids": [role.id for role in member.roles if not role.is_default()],
+            }
+            for member in members[:MAX_MEMBER_RESULTS]
+        ]
+        return json.dumps(
+            {
+                "query": query,
+                "count": len(results),
+                "truncated": len(members) > MAX_MEMBER_RESULTS,
+                "members": results,
+            },
+            ensure_ascii=False,
+        )
+
     async def _manage_member_role(
         self,
         guild: discord.Guild | None,
@@ -425,7 +470,31 @@ class GroqChat(commands.Cog):
             return json.dumps({"error": "Bot tidak memiliki permission Manage Roles."})
 
         try:
-            member_id = int(arguments.get("member_id"))
+            member_id_value = arguments.get("member_id")
+            if member_id_value is None:
+                member_query = str(arguments.get("member_query", "")).strip().lower()
+                mention_id = re.fullmatch(r"<@!?(\d+)>", member_query)
+                if mention_id:
+                    member_query = mention_id.group(1)
+                matches = [
+                    member for member in guild.members
+                    if member_query and (
+                        member_query in member.name.lower()
+                        or member_query in member.display_name.lower()
+                        or member_query in str(member).lower()
+                        or member_query in str(member.id)
+                    )
+                ]
+                if len(matches) != 1:
+                    return json.dumps({
+                        "error": "member_query harus cocok dengan tepat satu member.",
+                        "matches": [
+                            {"id": member.id, "mention": member.mention, "display_name": member.display_name}
+                            for member in matches[:MAX_MEMBER_RESULTS]
+                        ],
+                    }, ensure_ascii=False)
+                member_id_value = matches[0].id
+            member_id = int(member_id_value)
             role_id = int(arguments.get("role_id"))
         except (TypeError, ValueError):
             return json.dumps({"error": "member_id dan role_id harus berupa angka."})
@@ -670,6 +739,10 @@ class GroqChat(commands.Cog):
                                 "type": "integer",
                                 "description": "Discord user ID target.",
                             },
+                            "member_query": {
+                                "type": "string",
+                                "description": "Username/display name jika member_id tidak diketahui; harus unik.",
+                            },
                             "role_id": {
                                 "type": "integer",
                                 "description": "Discord role ID yang dikelola.",
@@ -680,7 +753,43 @@ class GroqChat(commands.Cog):
                                 "description": "Aksi yang dilakukan.",
                             },
                         },
-                        "required": ["member_id", "role_id", "action"],
+                        "required": ["role_id", "action"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_members",
+                    "description": (
+                        "Lihat member server yang tersedia. Gunakan query untuk mencari "
+                        "username atau display name. Hasil berisi ID dan mention."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Kata pencarian username/display name/ID; kosongkan untuk daftar terbatas.",
+                            }
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "find_member",
+                    "description": "Cari satu atau beberapa member server dan kembalikan mention serta ID-nya.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Username, display name, mention, atau ID member.",
+                            }
+                        },
+                        "required": ["query"],
                     },
                 },
             },
@@ -701,6 +810,10 @@ class GroqChat(commands.Cog):
             return generate_image(arguments.get("prompt", ""))
         if name == "list_roles":
             return self._list_roles(guild)
+        if name == "list_members":
+            return self._list_members(guild, str(arguments.get("query", "")))
+        if name == "find_member":
+            return self._list_members(guild, str(arguments.get("query", "")))
         if name == "manage_member_role":
             return await self._manage_member_role(guild, requester, arguments)
         return f"Tool {name} tidak dikenal."
@@ -733,6 +846,7 @@ class GroqChat(commands.Cog):
             "Gunakan tool lain bila perlu: search_web untuk informasi terbaru; "
             "run_python_code untuk kalkulasi atau analisis data; "
             "generate_image untuk permintaan gambar; list_roles untuk membaca role; "
+            "list_members/find_member untuk mencari member dan menggunakan mention/ID; "
             "manage_member_role hanya untuk permintaan role yang jelas dan sah. "
             "Jangan pakai tool untuk pertanyaan umum yang bisa dijawab tanpa alat. "
             "Jika ada is-replying: true, gunakan isi pesan yang sedang dibalas sebagai objek "

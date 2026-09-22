@@ -83,6 +83,11 @@ ditolak otomatis. Isi `BOT_OWNER_IDS` dengan Discord user ID owner bot jika
 owner perlu melewati pemeriksaan hierarchy pemanggil; permission dan hierarchy
 bot tetap wajib.
 
+Tool `list_members` dan `find_member` dapat mencari member berdasarkan username,
+display name, mention, atau ID. Hasilnya berisi ID dan format mention Discord
+sehingga Ferra dapat menyebut member atau meneruskan target ke role tool.
+Hasil daftar dibatasi agar tidak membocorkan seluruh data server ke prompt.
+
 ## Memilih orang secara acak
 
 Jalankan `/choose-random-person`, tentukan jumlah orang, lalu ikuti wizard

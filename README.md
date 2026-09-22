@@ -7,6 +7,8 @@ berbasis cog agar fitur baru dapat ditambahkan secara terpisah.
 ## Fitur
 
 - `/ping` untuk memeriksa latency bot.
+- `/ferra` untuk bertanya kepada asisten AI.
+- `!ferra` untuk bertanya melalui prefix command di server.
 - `/choose-random-person` dengan wizard interaktif.
 - Pemilihan satu atau beberapa anggota secara acak.
 - Mode kandidat yang mendukung instalasi aplikasi untuk pengguna.

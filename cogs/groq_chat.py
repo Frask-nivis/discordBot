@@ -1,17 +1,20 @@
+import asyncio
 import json
 import math
 import os
 import random
 import statistics
+import time
 import urllib.parse
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, suppress
 from datetime import datetime
 from io import StringIO
+from typing import Awaitable, Callable
 
 import discord
 from discord import app_commands
 from discord.ext import commands
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from groq import Groq
 
 
@@ -20,6 +23,7 @@ SUMMARY_TRIGGER = 6
 MAX_SUMMARY_CHARS = 700
 MAX_TOOL_ROUNDS = 3
 MODEL_NAME = "openai/gpt-oss-120b"
+ACTIVITY_INTERVAL = 1.0
 
 
 def search_web(query: str) -> str:
@@ -30,7 +34,13 @@ def search_web(query: str) -> str:
         with DDGS() as ddgs:
             results = ddgs.text(query, max_results=3)
     except Exception as exc:
-        return f"Gagal mencari web: {exc}"
+        if "CERTIFICATE_VERIFY_FAILED" not in str(exc):
+            return f"Gagal mencari web: {exc}"
+        try:
+            with DDGS(verify=False) as ddgs:
+                results = ddgs.text(query, max_results=3)
+        except Exception as retry_exc:
+            return f"Gagal mencari web: {retry_exc}"
 
     if not results:
         return "Tidak ada hasil pencarian yang relevan."
@@ -91,6 +101,77 @@ def generate_image(prompt: str) -> str:
         "https://image.pollinations.ai/prompt/"
         f"{encoded_prompt}?width=1024&height=1024&nologo=true"
     )
+
+
+class ToolActivity:
+    """One editable Discord embed used as progress UI for every AI tool."""
+
+    _frames = (
+        ("◌", "Menyiapkan permintaan"),
+        ("◍", "AI sedang berpikir"),
+        ("◎", "Menjalankan tool"),
+        ("◉", "Menerima hasil"),
+    )
+
+    def __init__(self, send: Callable[..., Awaitable[discord.Message]]) -> None:
+        self.send = send
+        self.message: discord.Message | None = None
+        self.tool_name = "AI"
+        self.detail = "Memproses permintaan..."
+        self.started_at = time.monotonic()
+        self._frame_index = 0
+        self._animation_task: asyncio.Task | None = None
+
+    def _embed(self) -> discord.Embed:
+        icon, phase = self._frames[self._frame_index % len(self._frames)]
+        elapsed = time.monotonic() - self.started_at
+        embed = discord.Embed(
+            title=f"{icon} Ferra sedang bekerja",
+            description=f"**{phase}**\n`{self.tool_name}`\n{self.detail}",
+            colour=discord.Colour.blurple(),
+        )
+        embed.set_footer(text=f"Berjalan {elapsed:.1f} detik")
+        return embed
+
+    async def start(self) -> None:
+        self.message = await self.send(embed=self._embed())
+        self._animation_task = asyncio.create_task(self._animate())
+
+    async def _animate(self) -> None:
+        try:
+            while self.message is not None:
+                await asyncio.sleep(ACTIVITY_INTERVAL)
+                self._frame_index += 1
+                try:
+                    await self.message.edit(embed=self._embed())
+                except discord.NotFound:
+                    return
+                except discord.HTTPException:
+                    pass
+        except asyncio.CancelledError:
+            return
+
+    async def update(self, tool_name: str, detail: str) -> None:
+        self.tool_name = tool_name
+        self.detail = detail[:180]
+        if self.message is not None:
+            try:
+                await self.message.edit(embed=self._embed())
+            except (discord.HTTPException, discord.NotFound):
+                pass
+
+    async def stop(self) -> None:
+        if self._animation_task is not None:
+            self._animation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._animation_task
+            self._animation_task = None
+        if self.message is not None:
+            try:
+                await self.message.delete()
+            except (discord.HTTPException, discord.NotFound):
+                pass
+            self.message = None
 
 
 class UserHistory:
@@ -191,7 +272,7 @@ class GroqChat(commands.Cog):
 
     def _trim_question(self, text: str) -> str:
         normalized = text.strip()
-        for prefix in ("!ask-groq", "!groq"):
+        for prefix in ("!ferra",):
             if normalized.lower().startswith(prefix):
                 return normalized[len(prefix):].strip()
         return normalized
@@ -251,7 +332,13 @@ class GroqChat(commands.Cog):
             return generate_image(arguments.get("prompt", ""))
         return f"Tool {name} tidak dikenal."
 
-    async def _ask_groq(self, user_id: int, question: str, reply_context: str | None = None) -> str:
+    async def _ask_groq(
+        self,
+        user_id: int,
+        question: str,
+        reply_context: str | None = None,
+        activity: ToolActivity | None = None,
+    ) -> str:
         if not self.groq.api_key:
             return "GROQ_API_KEY belum diatur. Isi variabel environment tersebut di Railway atau file .env."
 
@@ -260,7 +347,9 @@ class GroqChat(commands.Cog):
 
         system_prompt = (
             "Kamu adalah asisten Discord yang cerdas, ramah, dan ringkas. "
-            "Gunakan tool bila perlu: search_web untuk berita atau fakta terbaru; "
+            "Untuk berita, cuaca, harga, jadwal, skor, atau fakta yang bisa berubah, "
+            "wajib panggil search_web terlebih dahulu dan gunakan hasilnya dalam jawaban. "
+            "Gunakan tool lain bila perlu: search_web untuk informasi terbaru; "
             "run_python_code untuk kalkulasi atau analisis data; "
             "generate_image untuk permintaan gambar. "
             "Jangan pakai tool untuk pertanyaan umum yang bisa dijawab tanpa alat. "
@@ -314,9 +403,25 @@ class GroqChat(commands.Cog):
                         arguments = json.loads(call.function.arguments)
                         if not isinstance(arguments, dict):
                             raise ValueError("Argumen tool harus berupa object JSON.")
-                        result = self._tool_executor(call.function.name, arguments)
+                        if activity is not None:
+                            detail = "Memproses tool..."
+                            if call.function.name == "search_web":
+                                detail = f"Mencari: {arguments.get('query', '')}"
+                            elif call.function.name == "generate_image":
+                                detail = "Menyiapkan gambar dari prompt..."
+                            elif call.function.name == "run_python_code":
+                                detail = "Menghitung hasil secara aman..."
+                            await activity.update(call.function.name, detail)
+                        result = await asyncio.to_thread(
+                            self._tool_executor,
+                            call.function.name,
+                            arguments,
+                        )
                     except (TypeError, ValueError, json.JSONDecodeError) as exc:
                         result = f"Tool gagal dijalankan: {exc}"
+
+                    if activity is not None:
+                        await activity.update(call.function.name, "Hasil diterima, menyusun jawaban...")
 
                     messages.append({
                         "role": "tool",
@@ -344,6 +449,20 @@ class GroqChat(commands.Cog):
             return forced_text or "Saya sudah menjalankan tool, tetapi tidak ada ringkasan final yang dikembalikan."
         except Exception as exc:
             return f"Gagal menghubungi Groq: {exc}"
+
+    async def _ask_with_activity(
+        self,
+        user_id: int,
+        question: str,
+        send,
+        reply_context: str | None = None,
+    ) -> str:
+        activity = ToolActivity(send)
+        await activity.start()
+        try:
+            return await self._ask_groq(user_id, question, reply_context, activity)
+        finally:
+            await activity.stop()
 
     async def _resolve_referenced_message(self, message: discord.Message) -> discord.Message | None:
         if message.reference is None:
@@ -419,7 +538,7 @@ class GroqChat(commands.Cog):
             )
         )
 
-        command_prefixes = ("!ask-groq", "!groq")
+        command_prefixes = ("!ferra",)
         if not (is_replying and referenced_message.author == self.bot.user or has_mention or content.lower().startswith(command_prefixes)):
             return
 
@@ -434,32 +553,43 @@ class GroqChat(commands.Cog):
             await message.reply("Tulis pertanyaan setelah perintah, atau balas pesan bot lalu kirim pertanyaanmu.")
             return
 
-        answer = await self._ask_groq(message.author.id, question, reply_context)
+        answer = await self._ask_with_activity(
+            message.author.id,
+            question,
+            message.reply,
+            reply_context,
+        )
         await self._send_answer(message.reply, answer)
         await self._remember(message.author.id, question, answer[:1000])
 
-    @app_commands.command(name="ask-groq", description="Tanya Groq dengan konteks ringkas per user.")
+    @app_commands.command(name="ferra", description="Tanya Ferra dengan konteks ringkas per user.")
     @app_commands.describe(question="Pertanyaan Anda untuk Groq.")
     async def ask_groq(self, interaction: discord.Interaction, question: str) -> None:
         await interaction.response.defer()
-        answer = await self._ask_groq(interaction.user.id, question)
+        answer = await self._ask_with_activity(
+            interaction.user.id,
+            question,
+            interaction.followup.send,
+        )
         await self._send_answer(interaction.followup.send, answer)
         await self._remember(interaction.user.id, question, answer[:1000])
 
-    @commands.command(name="ask-groq")
-    async def ask_groq_text(self, ctx: commands.Context, *, question: str) -> None:
+    @commands.command(name="ferra")
+    async def ferra_text(self, ctx: commands.Context, *, question: str) -> None:
         if not question.strip():
-            await ctx.reply("Tulis pertanyaan setelah `!ask-groq`.")
+            await ctx.reply("Tulis pertanyaan setelah `!ferra`.")
             return
 
         reply_context = await self._resolve_reply_context(ctx.message)
-        answer = await self._ask_groq(ctx.author.id, question, reply_context)
+        answer = await self._ask_with_activity(
+            ctx.author.id,
+            question,
+            ctx.reply,
+            reply_context,
+        )
         await self._send_answer(ctx.reply, answer)
         await self._remember(ctx.author.id, question, answer[:1000])
 
-    @commands.command(name="groq")
-    async def groq_text(self, ctx: commands.Context, *, question: str) -> None:
-        await self.ask_groq_text(ctx, question=question)
 
 
 async def setup(bot: commands.Bot) -> None:

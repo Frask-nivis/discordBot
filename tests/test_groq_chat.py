@@ -1,8 +1,9 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from cogs.groq_chat import GroqChat, MODEL_NAME, UserHistory
+from cogs.groq_chat import GroqChat, MODEL_NAME, ToolActivity, UserHistory, search_web
 
 
 class FakeCompletions:
@@ -84,7 +85,139 @@ class RepeatingToolCompletions:
         )
 
 
+class SingleToolCompletions:
+    def __init__(self, tool_name):
+        self.tool_name = tool_name
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            arguments = {
+                "search_web": '{"query":"berita terbaru"}',
+                "run_python_code": '{"code":"print(1)"}',
+                "generate_image": '{"prompt":"kucing"}',
+            }[self.tool_name]
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=None,
+                            tool_calls=[
+                                SimpleNamespace(
+                                    id="call-1",
+                                    type="function",
+                                    function=SimpleNamespace(
+                                        name=self.tool_name,
+                                        arguments=arguments,
+                                    ),
+                                )
+                            ],
+                        )
+                    )
+                ]
+            )
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="Tool selesai.",
+                        tool_calls=None,
+                    )
+                )
+            ]
+        )
+
+
+class FakeActivity:
+    def __init__(self):
+        self.updates = []
+
+    async def update(self, tool_name, detail):
+        self.updates.append((tool_name, detail))
+
+
+class FakeActivityMessage:
+    def __init__(self):
+        self.edits = []
+        self.deleted = False
+
+    async def edit(self, **kwargs):
+        self.edits.append(kwargs)
+
+    async def delete(self):
+        self.deleted = True
+
+
 class GroqChatTests(unittest.TestCase):
+    def test_activity_reuses_and_deletes_one_message(self):
+        sent = []
+
+        async def send(**kwargs):
+            message = FakeActivityMessage()
+            sent.append((message, kwargs))
+            return message
+
+        async def exercise():
+            activity = ToolActivity(send)
+            await activity.start()
+            await activity.update("search_web", "Mencari berita")
+            message = activity.message
+            await activity.stop()
+            return message
+
+        message = asyncio.run(exercise())
+
+        self.assertEqual(len(sent), 1)
+        self.assertIsNotNone(message)
+        self.assertEqual(len(message.edits), 1)
+        self.assertTrue(message.deleted)
+
+    def test_activity_updates_every_tool(self):
+        for tool_name in ("search_web", "run_python_code", "generate_image"):
+            completions = SingleToolCompletions(tool_name)
+            cog = GroqChat.__new__(GroqChat)
+            cog.groq = SimpleNamespace(
+                api_key="test-key",
+                chat=SimpleNamespace(completions=completions),
+            )
+            cog.user_histories = {}
+            cog._tool_executor = lambda name, arguments: "hasil tool"
+            activity = FakeActivity()
+
+            result = asyncio.run(cog._ask_groq(1, "jalankan tool", activity=activity))
+
+            self.assertEqual(result, "Tool selesai.")
+            self.assertTrue(any(update[0] == tool_name for update in activity.updates))
+            self.assertEqual(completions.calls[0]["model"], MODEL_NAME)
+
+    def test_search_web_formats_results(self):
+        fake_results = [
+            {
+                "title": "Berita terkini",
+                "href": "https://example.com/news",
+                "body": "Ringkasan berita.",
+            }
+        ]
+
+        with patch("cogs.groq_chat.DDGS") as ddgs_class:
+            ddgs_class.return_value.__enter__.return_value.text.return_value = fake_results
+
+            result = search_web("berita terkini")
+
+        self.assertIn("Berita terkini", result)
+        self.assertIn("https://example.com/news", result)
+        self.assertIn("Ringkasan berita.", result)
+
+    def test_search_web_returns_provider_error(self):
+        with patch("cogs.groq_chat.DDGS") as ddgs_class:
+            ddgs_class.return_value.__enter__.return_value.text.side_effect = RuntimeError("provider down")
+
+            result = search_web("berita terkini")
+
+        self.assertIn("Gagal mencari web", result)
+        self.assertIn("provider down", result)
+
     def test_reply_context_does_not_include_old_history(self):
         history = UserHistory()
         history.summary = "Topik lama yang tidak relevan"

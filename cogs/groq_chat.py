@@ -1,5 +1,7 @@
 import asyncio
+import inspect
 import json
+import logging
 import math
 import mimetypes
 import os
@@ -22,6 +24,9 @@ from ddgs import DDGS
 from groq import Groq
 
 
+logger = logging.getLogger("discord_bot.groq_chat")
+
+
 MAX_RECENT_TURNS = 4
 SUMMARY_TRIGGER = 6
 MAX_SUMMARY_CHARS = 700
@@ -29,6 +34,11 @@ MAX_TOOL_ROUNDS = 3
 MODEL_NAME = "openai/gpt-oss-120b"
 ACTIVITY_INTERVAL = 1.0
 CREATOR_NAME = os.getenv("FERRA_CREATOR_NAME", "Taniki")
+BOT_OWNER_IDS = {
+    int(value.strip())
+    for value in os.getenv("BOT_OWNER_IDS", "").split(",")
+    if value.strip().isdigit()
+}
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_ATTACHMENT_TEXT_CHARS = 12000
 
@@ -374,6 +384,95 @@ class GroqChat(commands.Cog):
         return history
 
     @staticmethod
+    def _role_control_error() -> str:
+        return (
+            "Role tidak dapat diubah. Pastikan bot memiliki Manage Roles, "
+            "role target berada di bawah role tertinggi bot, dan pemanggil adalah "
+            "owner bot atau memiliki role lebih tinggi dari role target."
+        )
+
+    def _list_roles(self, guild: discord.Guild | None) -> str:
+        if guild is None:
+            return json.dumps({"error": "Tool role hanya tersedia di server."})
+
+        roles = [
+            {
+                "id": role.id,
+                "name": role.name,
+                "position": role.position,
+                "managed": role.managed,
+                "mentionable": role.mentionable,
+            }
+            for role in reversed(guild.roles)
+        ]
+        return json.dumps({"roles": roles}, ensure_ascii=False)
+
+    async def _manage_member_role(
+        self,
+        guild: discord.Guild | None,
+        requester: discord.Member | discord.User | None,
+        arguments: dict,
+    ) -> str:
+        if guild is None or requester is None:
+            return json.dumps({"error": "Tool role hanya tersedia di server."})
+
+        if not isinstance(requester, discord.Member):
+            requester = guild.get_member(requester.id)
+        bot_member = guild.me
+        if requester is None or bot_member is None:
+            return json.dumps({"error": "Data member server tidak tersedia."})
+        if not bot_member.guild_permissions.manage_roles:
+            return json.dumps({"error": "Bot tidak memiliki permission Manage Roles."})
+
+        try:
+            member_id = int(arguments.get("member_id"))
+            role_id = int(arguments.get("role_id"))
+        except (TypeError, ValueError):
+            return json.dumps({"error": "member_id dan role_id harus berupa angka."})
+
+        action = str(arguments.get("action", "")).lower()
+        if action not in {"add", "remove"}:
+            return json.dumps({"error": "action harus add atau remove."})
+
+        member = guild.get_member(member_id)
+        role = guild.get_role(role_id)
+        if member is None or role is None:
+            return json.dumps({"error": "Member atau role tidak ditemukan."})
+        if role.is_default() or role.managed:
+            return json.dumps({"error": "@everyone dan managed role tidak dapat diubah."})
+        if role >= bot_member.top_role:
+            return json.dumps({"error": self._role_control_error()})
+        if member == bot_member or member.id == guild.owner_id:
+            return json.dumps({"error": "Target member ini tidak dapat diubah oleh tool."})
+
+        is_owner = requester.id in BOT_OWNER_IDS
+        if not is_owner:
+            if not requester.guild_permissions.manage_roles:
+                return json.dumps({"error": "Pemanggil tidak memiliki Manage Roles."})
+            if requester.top_role <= role:
+                return json.dumps({"error": self._role_control_error()})
+
+        try:
+            if action == "add":
+                await member.add_roles(role, reason=f"Ferra role tool oleh {requester} (owner={is_owner})")
+            else:
+                await member.remove_roles(role, reason=f"Ferra role tool oleh {requester} (owner={is_owner})")
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            return json.dumps({"error": f"Discord menolak perubahan role: {exc}"})
+
+        logger.info(
+            "Role action=%s member=%s role=%s requester=%s owner=%s guild=%s",
+            action, member.id, role.id, requester.id, is_owner, guild.id,
+        )
+        return json.dumps({
+            "ok": True,
+            "action": action,
+            "member_id": member.id,
+            "role_id": role.id,
+            "role_name": role.name,
+        }, ensure_ascii=False)
+
+    @staticmethod
     def _unique_attachments(
         attachments: list[discord.Attachment],
     ) -> list[discord.Attachment]:
@@ -544,15 +643,66 @@ class GroqChat(commands.Cog):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_roles",
+                    "description": "Baca daftar role server dan posisi hierarchy-nya.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "manage_member_role",
+                    "description": (
+                        "Tambah atau hapus satu role dari satu member. Gunakan hanya "
+                        "setelah user meminta perubahan role secara jelas. Permission "
+                        "dan hierarchy tetap diverifikasi oleh aplikasi."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "member_id": {
+                                "type": "integer",
+                                "description": "Discord user ID target.",
+                            },
+                            "role_id": {
+                                "type": "integer",
+                                "description": "Discord role ID yang dikelola.",
+                            },
+                            "action": {
+                                "type": "string",
+                                "enum": ["add", "remove"],
+                                "description": "Aksi yang dilakukan.",
+                            },
+                        },
+                        "required": ["member_id", "role_id", "action"],
+                    },
+                },
+            },
         ]
 
-    def _tool_executor(self, name: str, arguments: dict) -> str:
+    async def _tool_executor(
+        self,
+        name: str,
+        arguments: dict,
+        guild: discord.Guild | None = None,
+        requester: discord.Member | discord.User | None = None,
+    ) -> str:
         if name == "search_web":
             return search_web(arguments.get("query", ""))
         if name == "run_python_code":
             return run_python_code(arguments.get("code", ""))
         if name == "generate_image":
             return generate_image(arguments.get("prompt", ""))
+        if name == "list_roles":
+            return self._list_roles(guild)
+        if name == "manage_member_role":
+            return await self._manage_member_role(guild, requester, arguments)
         return f"Tool {name} tidak dikenal."
 
     async def _ask_groq(
@@ -562,6 +712,8 @@ class GroqChat(commands.Cog):
         reply_context: str | None = None,
         activity: ToolActivity | None = None,
         attachment_context: str | None = None,
+        guild: discord.Guild | None = None,
+        requester: discord.Member | discord.User | None = None,
     ) -> str:
         if not self.groq.api_key:
             return "GROQ_API_KEY belum diatur. Isi variabel environment tersebut di Railway atau file .env."
@@ -580,7 +732,8 @@ class GroqChat(commands.Cog):
             "wajib panggil search_web terlebih dahulu dan gunakan hasilnya dalam jawaban. "
             "Gunakan tool lain bila perlu: search_web untuk informasi terbaru; "
             "run_python_code untuk kalkulasi atau analisis data; "
-            "generate_image untuk permintaan gambar. "
+            "generate_image untuk permintaan gambar; list_roles untuk membaca role; "
+            "manage_member_role hanya untuk permintaan role yang jelas dan sah. "
             "Jangan pakai tool untuk pertanyaan umum yang bisa dijawab tanpa alat. "
             "Jika ada is-replying: true, gunakan isi pesan yang sedang dibalas sebagai objek "
             "konteks untuk tugas user, misalnya terjemahan, rangkuman, atau penjelasan. "
@@ -641,11 +794,26 @@ class GroqChat(commands.Cog):
                             elif call.function.name == "run_python_code":
                                 detail = "Menghitung hasil secara aman..."
                             await activity.update(call.function.name, detail)
-                        result = await asyncio.to_thread(
-                            self._tool_executor,
-                            call.function.name,
-                            arguments,
-                        )
+                        if inspect.iscoroutinefunction(self._tool_executor):
+                            result = await self._tool_executor(
+                                call.function.name, arguments, guild, requester
+                            )
+                        else:
+                            parameters = inspect.signature(self._tool_executor).parameters
+                            if len(parameters) >= 4:
+                                result = await asyncio.to_thread(
+                                    self._tool_executor,
+                                    call.function.name,
+                                    arguments,
+                                    guild,
+                                    requester,
+                                )
+                            else:
+                                result = await asyncio.to_thread(
+                                    self._tool_executor,
+                                    call.function.name,
+                                    arguments,
+                                )
                     except (TypeError, ValueError, json.JSONDecodeError) as exc:
                         result = f"Tool gagal dijalankan: {exc}"
 
@@ -686,6 +854,8 @@ class GroqChat(commands.Cog):
         send,
         reply_context: str | None = None,
         attachments: list[discord.Attachment] | None = None,
+        guild: discord.Guild | None = None,
+        requester: discord.Member | discord.User | None = None,
     ) -> str:
         activity = ToolActivity(send)
         await activity.start()
@@ -697,6 +867,8 @@ class GroqChat(commands.Cog):
                 reply_context,
                 activity,
                 attachment_context,
+                guild,
+                requester,
             )
         finally:
             await activity.stop()
@@ -815,6 +987,8 @@ class GroqChat(commands.Cog):
             message.reply,
             reply_context,
             attachments,
+            message.guild,
+            message.author,
         )
         await self._send_answer(message.reply, answer)
         await self._remember(message.author.id, question, answer[:1000])
@@ -838,6 +1012,8 @@ class GroqChat(commands.Cog):
             question,
             interaction.followup.send,
             attachments=attachments,
+            guild=interaction.guild,
+            requester=interaction.user,
         )
         await self._send_answer(interaction.followup.send, answer)
         await self._remember(interaction.user.id, question, answer[:1000])
@@ -855,6 +1031,8 @@ class GroqChat(commands.Cog):
             ctx.reply,
             reply_context,
             list(ctx.message.attachments),
+            ctx.guild,
+            ctx.author,
         )
         await self._send_answer(ctx.reply, answer)
         await self._remember(ctx.author.id, question, answer[:1000])

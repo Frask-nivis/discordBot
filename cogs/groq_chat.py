@@ -3,6 +3,7 @@ import json
 import math
 import os
 import random
+import re
 import statistics
 import time
 import urllib.parse
@@ -516,14 +517,27 @@ class GroqChat(commands.Cog):
             remaining = remaining[split_at:]
         return chunks
 
+    @staticmethod
+    def _image_url_from_answer(answer: str) -> str | None:
+        image_url_match = re.search(
+            r"https://image\.pollinations\.ai/[^\s<>\]\)\"']+",
+            answer,
+        )
+        if image_url_match is None:
+            return None
+
+        image_url = image_url_match.group(0).rstrip(".,;:!?`")
+        return image_url if image_url.startswith("https://") else None
+
     async def _send_answer(self, send, answer: str) -> None:
-        if "https://image.pollinations.ai/" in answer:
+        image_url = self._image_url_from_answer(answer)
+        if image_url is not None:
             embed = discord.Embed(
                 title="Hasil gambar AI",
                 description="Berikut hasil gambar yang diminta.",
                 color=discord.Color.blurple(),
             )
-            embed.set_image(url=answer)
+            embed.set_image(url=image_url)
             await send(embed=embed)
             return
 

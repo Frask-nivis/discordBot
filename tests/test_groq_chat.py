@@ -150,6 +150,22 @@ class FakeActivityMessage:
 
 
 class GroqChatTests(unittest.TestCase):
+    def test_image_url_extracts_url_from_ai_explanation(self):
+        answer = (
+            "Gambar sudah dibuat: "
+            "https://image.pollinations.ai/prompt/kucing%20futuristik?width=1024&height=1024&nologo=true."
+        )
+
+        image_url = GroqChat._image_url_from_answer(answer)
+
+        self.assertEqual(
+            image_url,
+            "https://image.pollinations.ai/prompt/kucing%20futuristik?width=1024&height=1024&nologo=true",
+        )
+
+    def test_image_url_does_not_accept_unrelated_text(self):
+        self.assertIsNone(GroqChat._image_url_from_answer("Tidak ada gambar."))
+
     def test_message_routing_accepts_dm_and_guild_patterns(self):
         self.assertTrue(GroqChat._message_is_for_bot("!ferra halo", False, False))
         self.assertTrue(GroqChat._message_is_for_bot("halo", True, False))

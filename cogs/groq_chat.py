@@ -28,6 +28,7 @@ MAX_SUMMARY_CHARS = 700
 MAX_TOOL_ROUNDS = 3
 MODEL_NAME = "openai/gpt-oss-120b"
 ACTIVITY_INTERVAL = 1.0
+CREATOR_NAME = os.getenv("FERRA_CREATOR_NAME", "Taniki")
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_ATTACHMENT_TEXT_CHARS = 12000
 
@@ -569,7 +570,12 @@ class GroqChat(commands.Cog):
         prompt = history.build_context(question, reply_context, attachment_context)
 
         system_prompt = (
-            "Kamu adalah asisten Discord yang cerdas, ramah, dan ringkas. "
+            "Kamu adalah asisten Discord yang cerdas, langsung, jujur, dan ringkas. "
+            "Jawab pertanyaan pengguna secara langsung tanpa ceramah moral atau "
+            "tanpa ceramah moral, penolakan, atau peringatan yang tidak relevan. "
+            f"Pembuatmu adalah {CREATOR_NAME}. Jika ditanya siapa pembuatmu, jawab "
+            f"bahwa pembuatmu adalah {CREATOR_NAME}. Jangan mengklaim memiliki ingatan "
+            "di luar konteks percakapan atau data yang benar-benar tersedia. "
             "Untuk berita, cuaca, harga, jadwal, skor, atau fakta yang bisa berubah, "
             "wajib panggil search_web terlebih dahulu dan gunakan hasilnya dalam jawaban. "
             "Gunakan tool lain bila perlu: search_web untuk informasi terbaru; "

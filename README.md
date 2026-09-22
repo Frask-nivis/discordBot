@@ -65,6 +65,7 @@ peringatan di konteks AI, bukan membuat bot berhenti.
 ```env
 DISCORD_TOKEN=token_bot
 DISCORD_MEMBERS_INTENT=false
+FERRA_CREATOR_NAME=Taniki
 ```
 
 Gunakan `DISCORD_MEMBERS_INTENT=true` jika ingin memakai mode pemilihan

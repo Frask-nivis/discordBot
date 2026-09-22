@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from cogs.groq_chat import (
+    CREATOR_NAME,
     MAX_ATTACHMENT_BYTES,
     GroqChat,
     MODEL_NAME,
@@ -158,6 +159,9 @@ class FakeActivityMessage:
 
 
 class GroqChatTests(unittest.TestCase):
+    def test_creator_identity_is_configured(self):
+        self.assertEqual(CREATOR_NAME, "Taniki")
+
     def test_text_attachment_extraction_is_bounded(self):
         result = _extract_attachment_bytes(
             "notes.txt",

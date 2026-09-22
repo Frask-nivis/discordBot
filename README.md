@@ -10,6 +10,7 @@ berbasis cog agar fitur baru dapat ditambahkan secara terpisah.
 - `/ferra` untuk bertanya kepada asisten AI.
 - `!ferra` untuk bertanya melalui prefix command di server atau DM.
 - `/ferra` dapat digunakan di server dan DM bot.
+- `/ferra`, `!ferra`, mention, dan reply dapat menerima attachment untuk dianalisis.
 - `/choose-random-person` dengan wizard interaktif.
 - Pemilihan satu atau beberapa anggota secara acak.
 - Mode kandidat yang mendukung instalasi aplikasi untuk pengguna.
@@ -42,6 +43,22 @@ Untuk memakai Ferra melalui DM, buka DM dengan bot lalu gunakan `/ferra`,
 `!ferra`, atau sebut bot diikuti pertanyaan. Bot harus sudah dapat menerima
 pesan langsung dari akunmu, dan **Message Content Intent** perlu aktif untuk
 format `!ferra` atau mention.
+
+## Attachment
+
+Ferra menerima satu attachment pada `/ferra`, serta attachment pada pesan
+`!ferra`, mention, atau pesan yang direply. Batas setiap file adalah 10 MB.
+
+Format yang dibaca langsung:
+
+- TXT, Markdown, JSON, CSV, dan log.
+- PDF, DOCX, XLSX/XLSM.
+- Gambar untuk metadata format dan resolusi.
+- Video/audio untuk metadata dasar; transkripsi dan pemahaman visual penuh
+   belum dijalankan oleh model teks utama.
+
+File rusak, terlalu besar, atau format yang belum didukung akan menghasilkan
+peringatan di konteks AI, bukan membuat bot berhenti.
 
 ## Konfigurasi
 

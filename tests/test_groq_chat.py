@@ -3,7 +3,15 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from cogs.groq_chat import GroqChat, MODEL_NAME, ToolActivity, UserHistory, search_web
+from cogs.groq_chat import (
+    MAX_ATTACHMENT_BYTES,
+    GroqChat,
+    MODEL_NAME,
+    ToolActivity,
+    UserHistory,
+    _extract_attachment_bytes,
+    search_web,
+)
 
 
 class FakeCompletions:
@@ -150,6 +158,30 @@ class FakeActivityMessage:
 
 
 class GroqChatTests(unittest.TestCase):
+    def test_text_attachment_extraction_is_bounded(self):
+        result = _extract_attachment_bytes(
+            "notes.txt",
+            "text/plain",
+            b"Ringkasan proyek.",
+        )
+
+        self.assertEqual(result.kind, "text")
+        self.assertIn("Ringkasan proyek", result.text)
+        self.assertEqual(result.size, len(b"Ringkasan proyek."))
+
+    def test_unknown_attachment_returns_warning(self):
+        result = _extract_attachment_bytes(
+            "archive.bin",
+            "application/octet-stream",
+            b"binary",
+        )
+
+        self.assertEqual(result.kind, "unknown")
+        self.assertIn("belum didukung", result.warning)
+
+    def test_attachment_limit_is_ten_megabytes(self):
+        self.assertEqual(MAX_ATTACHMENT_BYTES, 10 * 1024 * 1024)
+
     def test_image_url_extracts_url_from_ai_explanation(self):
         answer = (
             "Gambar sudah dibuat: "

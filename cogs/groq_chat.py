@@ -277,6 +277,18 @@ class GroqChat(commands.Cog):
                 return normalized[len(prefix):].strip()
         return normalized
 
+    @staticmethod
+    def _message_is_for_bot(
+        content: str,
+        has_mention: bool,
+        is_replying_to_bot: bool,
+    ) -> bool:
+        return bool(
+            is_replying_to_bot
+            or has_mention
+            or content.lower().startswith("!ferra")
+        )
+
     def _tool_definitions(self) -> list[dict]:
         return [
             {
@@ -538,12 +550,12 @@ class GroqChat(commands.Cog):
             )
         )
 
-        command_prefixes = ("!ferra",)
-        if not (is_replying and referenced_message.author == self.bot.user or has_mention or content.lower().startswith(command_prefixes)):
+        is_replying_to_bot = is_replying and referenced_message.author == self.bot.user
+        if not self._message_is_for_bot(content, has_mention, is_replying_to_bot):
             return
 
         question = content
-        if content.lower().startswith(command_prefixes):
+        if content.lower().startswith("!ferra"):
             question = self._trim_question(content)
         elif has_mention:
             if mention_id is not None:
@@ -563,6 +575,7 @@ class GroqChat(commands.Cog):
         await self._remember(message.author.id, question, answer[:1000])
 
     @app_commands.command(name="ferra", description="Tanya Ferra dengan konteks ringkas per user.")
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     @app_commands.describe(question="Pertanyaan Anda untuk Groq.")
     async def ask_groq(self, interaction: discord.Interaction, question: str) -> None:
         await interaction.response.defer()

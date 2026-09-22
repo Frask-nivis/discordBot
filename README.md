@@ -8,7 +8,8 @@ berbasis cog agar fitur baru dapat ditambahkan secara terpisah.
 
 - `/ping` untuk memeriksa latency bot.
 - `/ferra` untuk bertanya kepada asisten AI.
-- `!ferra` untuk bertanya melalui prefix command di server.
+- `!ferra` untuk bertanya melalui prefix command di server atau DM.
+- `/ferra` dapat digunakan di server dan DM bot.
 - `/choose-random-person` dengan wizard interaktif.
 - Pemilihan satu atau beberapa anggota secara acak.
 - Mode kandidat yang mendukung instalasi aplikasi untuk pengguna.
@@ -36,6 +37,11 @@ python main.py
 ```
 
 Setelah bot online, gunakan `/ping` pada server tempat bot telah diundang.
+
+Untuk memakai Ferra melalui DM, buka DM dengan bot lalu gunakan `/ferra`,
+`!ferra`, atau sebut bot diikuti pertanyaan. Bot harus sudah dapat menerima
+pesan langsung dari akunmu, dan **Message Content Intent** perlu aktif untuk
+format `!ferra` atau mention.
 
 ## Konfigurasi
 

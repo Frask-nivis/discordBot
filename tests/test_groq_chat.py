@@ -150,6 +150,12 @@ class FakeActivityMessage:
 
 
 class GroqChatTests(unittest.TestCase):
+    def test_message_routing_accepts_dm_and_guild_patterns(self):
+        self.assertTrue(GroqChat._message_is_for_bot("!ferra halo", False, False))
+        self.assertTrue(GroqChat._message_is_for_bot("halo", True, False))
+        self.assertTrue(GroqChat._message_is_for_bot("halo", False, True))
+        self.assertFalse(GroqChat._message_is_for_bot("halo", False, False))
+
     def test_activity_reuses_and_deletes_one_message(self):
         sent = []
 

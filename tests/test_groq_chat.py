@@ -358,8 +358,8 @@ class GroqChatTests(unittest.TestCase):
         self.assertEqual(result, "Hasil kalkulasi sudah selesai.")
         self.assertEqual(len(completions.calls), 4)
         self.assertTrue(all(call["tool_choice"] == "auto" for call in completions.calls[:3]))
-        self.assertEqual(completions.calls[3]["tool_choice"], "none")
-        self.assertTrue(completions.calls[3]["tools"])
+        self.assertNotIn("tool_choice", completions.calls[3])
+        self.assertNotIn("tools", completions.calls[3])
 
     def test_split_message_preserves_content_under_discord_limit(self):
         text = "baris\n" * 800

@@ -1003,23 +1003,23 @@ class GroqChat(commands.Cog):
                     })
 
             # Fix: Hindari konflik system prompt dan paksa jawaban final tanpa tool calls.
-            # Kita menyalin history dan mengganti system prompt pertama (index 0) 
-            # dengan instruksi final agar model tidak bingung.
+            # Model gpt-oss-120b terkadang tetap memanggil tool meskipun tool_choice="none".
+            # Cara paling aman adalah menghapus parameter 'tools' sepenuhnya di panggilan final.
             final_messages = messages.copy()
             if final_messages and final_messages[0]["role"] == "system":
                 final_messages[0] = {
                     "role": "system",
                     "content": (
                         "Susun jawaban final berdasarkan hasil tool yang sudah ada. "
-                        "Jangan memanggil tool lagi. Jawab langsung kepada user."
+                        "JANGAN memanggil tool lagi. Jawab langsung secara tekstual."
                     ),
                 }
 
             forced_response = self.groq.chat.completions.create(
                 model=MODEL_NAME,
                 messages=final_messages,
-                tools=tools,  # Tetap sertakan tools agar API tidak bingung jika model stubborn
-                tool_choice="none",  # Tetapi tegaskan bahwa tool tidak boleh dipanggil
+                # tools=tools,  <-- Hapus ini untuk benar-benar mencegah tool call
+                # tool_choice="none", <-- Omit ini jika tools tidak disertakan
                 temperature=0.4,
                 max_tokens=500,
             )

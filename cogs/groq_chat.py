@@ -23,6 +23,7 @@ from discord import app_commands
 from discord.ext import commands
 from ddgs import DDGS
 from groq import Groq
+from PIL import Image
 
 
 logger = logging.getLogger("discord_bot.groq_chat")
@@ -659,7 +660,37 @@ class GroqChat(commands.Cog):
             return AttachmentResult(filename, content_type, len(data), "image", "", "API Key tidak tersedia.")
 
         try:
-            base64_image = base64.b64encode(data).decode("utf-8")
+            # Konversi gambar ke format yang didukung (JPEG) dan ambil frame pertama jika GIF/animated
+            def process_image(img_data):
+                with Image.open(BytesIO(img_data)) as img:
+                    # Ambil frame pertama jika GIF/animasi
+                    if getattr(img, "is_animated", False):
+                        img.seek(0)
+                    
+                    # Konversi ke RGB (JPEG tidak mendukung transparansi, jadi kita tempel di background putih)
+                    if img.mode in ("RGBA", "P", "LA"):
+                        background = Image.new("RGB", img.size, (255, 255, 255))
+                        if img.mode == "P":
+                            img = img.convert("RGBA")
+                        background.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
+                        img = background
+                    else:
+                        img = img.convert("RGB")
+                    
+                    # Resize jika terlalu besar (optimal vision biasanya < 1.5MB dan dim < 2000px)
+                    max_dim = 1280
+                    if max(img.width, img.height) > max_dim:
+                        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+                    
+                    out_buffer = BytesIO()
+                    img.save(out_buffer, format="JPEG", quality=85)
+                    return out_buffer.getvalue(), img.width, img.height
+
+            processed_data, width, height = await asyncio.to_thread(process_image, data)
+            base64_image = base64.b64encode(processed_data).decode("utf-8")
+            
+            # Panggilan ke Vision API (Qwen 3.8 27B mendukung vision di Groq)
+            # Menggunakan max_completion_tokens dan reasoning_effort="none" untuk efisiensi deskripsi
             response = await asyncio.to_thread(
                 self.groq.chat.completions.create,
                 model=VISION_MODEL_NAME,
@@ -667,38 +698,42 @@ class GroqChat(commands.Cog):
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "Jelaskan isi gambar ini secara mendetail dan ekstrak teks jika ada."},
+                            {"type": "text", "text": "Apa yang terlihat dalam gambar ini? Berikan deskripsi detail dan teks apa pun yang ada."},
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": f"data:{content_type};base64,{base64_image}",
+                                    "url": f"data:image/jpeg;base64,{base64_image}",
                                 },
                             },
                         ],
                     }
                 ],
-                max_tokens=300,
+                max_completion_tokens=500,
+                extra_body={"reasoning_effort": "none"} if "qwen" in VISION_MODEL_NAME.lower() else {},
             )
             description = (response.choices[0].message.content or "").strip()
+            
+            # Kita kembalikan content_type sebagai image/jpeg karena sudah diproses
+            # Ini mencegah agent utama (gpt-oss) menolak gambar karena format "gif"
             return AttachmentResult(
-                filename, content_type, len(data), "image",
-                description or "Gambar berhasil diproses tetapi tidak ada deskripsi.",
+                filename, "image/jpeg", len(processed_data), "image",
+                description or "Gambar berhasil diproses tetapi model tidak memberikan deskripsi.",
                 "",
             )
         except Exception as exc:
-            logger.error("Vision analysis failed for %s: %s", filename, exc)
-            # Fallback ke metadata dasar jika vision gagal
+            logger.error("Vision failure for %s (%s): %s", filename, VISION_MODEL_NAME, exc)
+            
+            # Fallback metadata dasar
             try:
-                from PIL import Image
-                image = Image.open(BytesIO(data))
-                text = f"Gambar {image.format or 'unknown'}, resolusi {image.width}x{image.height}."
+                with Image.open(BytesIO(data)) as img:
+                    text = f"Gambar {img.format or 'unknown'}, resolusi {img.width}x{img.height}."
             except Exception:
-                text = "Gambar diterima tetapi gagal dianalisis."
+                text = "Gambar diterima tetapi gagal dianalisis secara visual."
             
             return AttachmentResult(
                 filename, content_type, len(data), "image",
                 text,
-                f"Gagal menggunakan Vision API: {exc}",
+                f"Vision API Error: {exc}",
             )
 
     async def _remember(self, user_id: int, user_text: str, bot_reply: str) -> None:
@@ -897,23 +932,18 @@ class GroqChat(commands.Cog):
         prompt = history.build_context(question, reply_context, attachment_context)
 
         system_prompt = (
-            "Kamu adalah asisten Discord yang cerdas, langsung, jujur, dan ringkas. "
-            "Jawab pertanyaan pengguna secara langsung tanpa ceramah moral atau "
-            "tanpa ceramah moral, penolakan, atau peringatan yang tidak relevan. "
-            f"Pembuatmu adalah {CREATOR_NAME}. Jika ditanya siapa pembuatmu, jawab "
-            f"bahwa pembuatmu adalah {CREATOR_NAME}. Jangan mengklaim memiliki ingatan "
-            "di luar konteks percakapan atau data yang benar-benar tersedia. "
-            "Untuk berita, cuaca, harga, jadwal, skor, atau fakta yang bisa berubah, "
-            "wajib panggil search_web terlebih dahulu dan gunakan hasilnya dalam jawaban. "
-            "Gunakan tool lain bila perlu: search_web untuk informasi terbaru; "
-            "run_python_code untuk kalkulasi atau analisis data; "
-            "generate_image untuk permintaan gambar; list_roles untuk membaca role; "
-            "list_members/find_member untuk mencari member dan menggunakan mention/ID; "
-            "manage_member_role hanya untuk permintaan role yang jelas dan sah. "
-            "Jangan pakai tool untuk pertanyaan umum yang bisa dijawab tanpa alat. "
-            "Jika ada is-replying: true, gunakan isi pesan yang sedang dibalas sebagai objek "
-            "konteks untuk tugas user, misalnya terjemahan, rangkuman, atau penjelasan. "
-            "Jika kamu menggunakan tool, jelaskan hasilnya secara jelas dan singkat."
+            "Lu adalah asisten Discord paling chill, jujur, dan to-the-point. "
+            "Pake bahasa anak gaul Jaksel/sosmed (pake 'lu/gue', 'chill', 'gas', 'fomo', dll). "
+            "Jawab pertanyaan user langsung, gak usah pake ceramah moral atau peringatan cringe. "
+            f"Pembuat lu itu {CREATOR_NAME}. Kalo ditanya siapa yang bikin, jawab {CREATOR_NAME} dengan bangga. "
+            "Lu jago banget paham konteks meme, sarkasme, dan kultur internet. "
+            "Kalo ada data gambar (Vision), analisis meme-nya, jelasin lucunya di mana atau konteks pop-culture nya. "
+            "Untuk berita, cuaca, atau fakta update, wajib panggil search_web dulu. "
+            "Gunakan tool lain kalo butuh: search_web buat info update; run_python_code buat ngitung; "
+            "generate_image buat bikin gambar; list_roles/list_members/find_member buat urusan server; "
+            "manage_member_role cuma kalo diminta jelas dan sah. "
+            "Kalo ada is-replying: true, fokus ke pesan yang dibales buat konteks tugas (translate, rangkum, dll). "
+            "Jelasin hasil tool secara singkat dan asik."
         )
 
         messages = [

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import inspect
 import json
 import logging
@@ -32,6 +33,7 @@ SUMMARY_TRIGGER = 6
 MAX_SUMMARY_CHARS = 700
 MAX_TOOL_ROUNDS = 3
 MODEL_NAME = "openai/gpt-oss-120b"
+VISION_MODEL_NAME = "qwen/qwen3.8-27b"
 ACTIVITY_INTERVAL = 1.0
 CREATOR_NAME = os.getenv("FERRA_CREATOR_NAME", "Taniki")
 BOT_OWNER_IDS = {
@@ -597,12 +599,19 @@ class GroqChat(commands.Cog):
 
             if activity is not None:
                 await activity.update("attachment", f"Membaca {filename[:100]}...")
-            result = await asyncio.to_thread(
-                _extract_attachment_bytes,
-                filename,
-                content_type,
-                data,
-            )
+            
+            kind = _attachment_kind(filename, content_type)
+            if kind == "image":
+                if activity is not None:
+                    await activity.update("vision", f"Menganalisis visual {filename[:50]}...")
+                result = await self._analyze_image_vision(filename, content_type, data)
+            else:
+                result = await asyncio.to_thread(
+                    _extract_attachment_bytes,
+                    filename,
+                    content_type,
+                    data,
+                )
             contexts.append(result.as_context())
 
         return "\n\n---\n\n".join(contexts)
@@ -638,6 +647,59 @@ class GroqChat(commands.Cog):
             pass
 
         return history.summary
+
+    async def _analyze_image_vision(
+        self,
+        filename: str,
+        content_type: str,
+        data: bytes,
+    ) -> AttachmentResult:
+        """Menganalisis gambar menggunakan model vision untuk mendapatkan deskripsi tekstual."""
+        if not self.groq.api_key:
+            return AttachmentResult(filename, content_type, len(data), "image", "", "API Key tidak tersedia.")
+
+        try:
+            base64_image = base64.b64encode(data).decode("utf-8")
+            response = await asyncio.to_thread(
+                self.groq.chat.completions.create,
+                model=VISION_MODEL_NAME,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Jelaskan isi gambar ini secara mendetail dan ekstrak teks jika ada."},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{content_type};base64,{base64_image}",
+                                },
+                            },
+                        ],
+                    }
+                ],
+                max_tokens=300,
+            )
+            description = (response.choices[0].message.content or "").strip()
+            return AttachmentResult(
+                filename, content_type, len(data), "image",
+                description or "Gambar berhasil diproses tetapi tidak ada deskripsi.",
+                "",
+            )
+        except Exception as exc:
+            logger.error("Vision analysis failed for %s: %s", filename, exc)
+            # Fallback ke metadata dasar jika vision gagal
+            try:
+                from PIL import Image
+                image = Image.open(BytesIO(data))
+                text = f"Gambar {image.format or 'unknown'}, resolusi {image.width}x{image.height}."
+            except Exception:
+                text = "Gambar diterima tetapi gagal dianalisis."
+            
+            return AttachmentResult(
+                filename, content_type, len(data), "image",
+                text,
+                f"Gagal menggunakan Vision API: {exc}",
+            )
 
     async def _remember(self, user_id: int, user_text: str, bot_reply: str) -> None:
         history = self._history_for(user_id)
@@ -940,19 +1002,24 @@ class GroqChat(commands.Cog):
                         "content": str(result),
                     })
 
-            final_messages = [
-                {
+            # Fix: Hindari konflik system prompt dan paksa jawaban final tanpa tool calls.
+            # Kita menyalin history dan mengganti system prompt pertama (index 0) 
+            # dengan instruksi final agar model tidak bingung.
+            final_messages = messages.copy()
+            if final_messages and final_messages[0]["role"] == "system":
+                final_messages[0] = {
                     "role": "system",
                     "content": (
-                        "Jangan memanggil tool lagi. Susun jawaban final hanya dari hasil tool "
-                        "yang sudah tersedia dan pertanyaan user."
+                        "Susun jawaban final berdasarkan hasil tool yang sudah ada. "
+                        "Jangan memanggil tool lagi. Jawab langsung kepada user."
                     ),
-                },
-                *messages,
-            ]
+                }
+
             forced_response = self.groq.chat.completions.create(
                 model=MODEL_NAME,
                 messages=final_messages,
+                tools=tools,  # Tetap sertakan tools agar API tidak bingung jika model stubborn
+                tool_choice="none",  # Tetapi tegaskan bahwa tool tidak boleh dipanggil
                 temperature=0.4,
                 max_tokens=500,
             )

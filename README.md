@@ -109,3 +109,16 @@ anggota server secara otomatis; gunakan mode kandidat dalam kondisi tersebut.
 
 Slash command global dapat memerlukan waktu beberapa menit untuk muncul setelah
 sinkronisasi pertama.
+
+## Pesan proactive saat server sepi
+
+Ferra memeriksa channel text yang dapat dibaca setiap jam. Jika tidak ada aktivitas manusia selama 4 jam, Ferra memilih satu channel secara acak dan mengirim maksimal satu pesan pada transisi idle tersebut. Pesan bot sendiri tidak dihitung sebagai aktivitas manusia.
+
+Pemilihan channel mengikuti nama dan topic channel:
+
+- Channel umum mendapat komentar singkat yang dibuat generatif dan tidak selalu sama.
+- Channel media dapat mendapat komentar yang relevan dengan konten atau meme.
+- Channel yang namanya/topic-nya mengandung sinyal art atau gambar mendapat embed gambar dari generator image.
+- Channel rules, mod-log, audit-log, staff, admin, private, announcement, read-only, atau yang menyebut bot dilarang dilewati.
+
+Bot harus memiliki **View Channel**, **Read Message History**, dan **Send Messages**. Jika history tidak dapat dibaca, channel tidak dipakai untuk pengiriman proactive. Fitur ini tidak menyimpan isi chat secara permanen; history Discord hanya dibaca saat pemeriksaan scheduler.

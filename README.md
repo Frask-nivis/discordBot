@@ -60,19 +60,6 @@ Format yang dibaca langsung:
 File rusak, terlalu besar, atau format yang belum didukung akan menghasilkan
 peringatan di konteks AI, bukan membuat bot berhenti.
 
-## Konfigurasi
-
-```env
-DISCORD_TOKEN=token_bot
-DISCORD_MEMBERS_INTENT=false
-FERRA_CREATOR_NAME=Taniki
-BOT_OWNER_IDS=123456789012345678
-```
-
-Gunakan `DISCORD_MEMBERS_INTENT=true` jika ingin memakai mode pemilihan
-otomatis dari server atau channel. Pastikan intent yang sama juga diaktifkan
-di Discord Developer Portal.
-
 ## Role tool
 
 AI memiliki tool terbatas untuk membaca role dan menambah atau menghapus satu

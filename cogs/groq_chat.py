@@ -1189,7 +1189,11 @@ class GroqChat(commands.Cog):
         content = message.content.strip()
         referenced_message = await self._resolve_referenced_message(message)
         is_replying = referenced_message is not None
-        reply_context = referenced_message.content.strip() if is_replying else None
+        if is_replying:
+            speaker = getattr(referenced_message.author, "display_name", None) or getattr(referenced_message.author, "name", "User")
+            reply_context = f"[{speaker}]\n{referenced_message.content.strip()}"
+        else:
+            reply_context = None
         attachments = list(message.attachments)
         if referenced_message is not None:
             attachments.extend(referenced_message.attachments)
@@ -1258,11 +1262,7 @@ class GroqChat(commands.Cog):
         await self._remember(interaction.user.id, question, answer[:1000])
 
     @commands.command(name="ferra")
-    async def ferra_text(self, ctx: commands.Context, *, question: str) -> None:
-        if not question.strip():
-            await ctx.reply("Tulis pertanyaan setelah `!ferra`.")
-            return
-
+    async def ferra_text(self, ctx: commands.Context, *, question: str = "") -> None:
         reply_context = await self._resolve_reply_context(ctx.message)
         answer = await self._ask_with_activity(
             ctx.author.id,

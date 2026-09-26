@@ -163,6 +163,32 @@ class GroqChatTests(unittest.TestCase):
     def test_creator_identity_is_configured(self):
         self.assertEqual(CREATOR_NAME, "Taniki")
 
+    def test_seehistory_tool_is_registered(self):
+        cog = GroqChat.__new__(GroqChat)
+        tool_names = {tool["function"]["name"] for tool in cog._tool_definitions()}
+
+        self.assertIn("seehistory", tool_names)
+
+    def test_seehistory_reads_labelled_channel_messages(self):
+        class FakeChannel:
+            id = 99
+
+            def history(self, **kwargs):
+                async def stream():
+                    yield SimpleNamespace(
+                        content="Pesan lama",
+                        attachments=[],
+                        author=SimpleNamespace(display_name="Taniki", name="taniki"),
+                    )
+                return stream()
+
+        cog = GroqChat.__new__(GroqChat)
+        result = asyncio.run(cog._see_history(FakeChannel(), minutes=15))
+
+        self.assertIn("HISTORY CHANNEL (15 menit terakhir)", result)
+        self.assertIn("[Taniki]", result)
+        self.assertIn("Pesan lama", result)
+
     def test_role_tools_are_registered(self):
         cog = GroqChat.__new__(GroqChat)
         tool_names = {tool["function"]["name"] for tool in cog._tool_definitions()}

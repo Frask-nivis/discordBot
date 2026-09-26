@@ -27,6 +27,7 @@ class DiscordBot(commands.Bot):
 		await self.load_extension("cogs.ping")
 		await self.load_extension("cogs.random_person")
 		await self.load_extension("cogs.groq_chat")
+		await self.load_extension("cogs.link_converter")
 		synced_commands = await self.tree.sync()
 		logger.info("Synchronized %d application command(s)", len(synced_commands))
 

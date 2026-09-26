@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 from pathlib import Path
 
@@ -21,7 +21,7 @@ class DiscordBot(commands.Bot):
 		intents = discord.Intents.default()
 		intents.message_content = True
 		intents.members = os.getenv("DISCORD_MEMBERS_INTENT", "false").lower() == "true"
-		super().__init__(command_prefix=commands.when_mentioned, intents=intents)
+		super().__init__(command_prefix=commands.when_mentioned_or("!"), intents=intents)
 
 	async def setup_hook(self) -> None:
 		await self.load_extension("cogs.ping")
@@ -50,3 +50,4 @@ def main() -> None:
 
 if __name__ == "__main__":
 	main()
+

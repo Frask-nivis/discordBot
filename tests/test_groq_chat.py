@@ -169,6 +169,21 @@ class GroqChatTests(unittest.TestCase):
 
         self.assertIn("seehistory", tool_names)
 
+    def test_seehistory_defaults_to_three_hours_and_clamps_at_six(self):
+        class FakeChannel:
+            def history(self, **kwargs):
+                async def stream():
+                    if False:
+                        yield None
+                return stream()
+
+        cog = GroqChat.__new__(GroqChat)
+        result = asyncio.run(cog._see_history(FakeChannel()))
+        self.assertIn("180 menit terakhir", result)
+
+        result = asyncio.run(cog._see_history(FakeChannel(), minutes=999))
+        self.assertIn("360 menit terakhir", result)
+
     def test_seehistory_reads_labelled_channel_messages(self):
         class FakeChannel:
             id = 99

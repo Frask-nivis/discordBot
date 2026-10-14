@@ -379,6 +379,13 @@ class GroqChatTests(unittest.TestCase):
 
         self.assertEqual(result, "Cuaca sudah dicari.")
         self.assertEqual(len(completions.calls), 2)
+        system_prompt = completions.calls[0]["messages"][0]["content"]
+        search_tool = next(
+            tool for tool in completions.calls[0]["tools"]
+            if tool["function"]["name"] == "search_web"
+        )
+        self.assertIn("call the search_web tool before answering", system_prompt)
+        self.assertIn("Jangan menebak", search_tool["function"]["description"])
         for call in completions.calls:
             self.assertEqual(call["model"], MODEL_NAME)
             self.assertEqual(call["tool_choice"], "auto")

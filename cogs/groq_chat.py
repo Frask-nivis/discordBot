@@ -75,6 +75,9 @@ FERRA_RESPONSE_GUARDRAILS = """
 - Do not respond to every channel message. Respond only when explicitly invoked, mentioned, or replied to.
 - The application may explicitly send an internal request beginning with PROACTIVE CHANNEL MESSAGE; in that case draft one message for the application to post, but never start a conversation on your own outside that internal request.
 - Use recent channel history only to resolve the meaning of the current invocation. Do not force unrelated old context into a new topic.
+- If you are unsure of a factual answer, or the answer depends on current or specific information, call the search_web tool before answering. Do not guess or say you do not know before trying a relevant search.
+- Use the search results as evidence, distinguish verified facts from uncertainty, and never invent details. If search fails or returns no relevant results, say briefly that you could not verify the answer.
+- Do not search when the user is joking, chatting casually, asking about their own preferences or private context, or when a brief clarification is needed instead.
 - Never end a response with a generic engagement question or offer such as "Ada yang mau lo tanyain lagi?", "Ada yang bisa gue bantu?", "Kalau butuh bantuan tinggal bilang", or similar variations.
 - Ask a question only when important information is genuinely missing and the answer would materially change the response. Do not ask a question merely to keep the conversation going.
 - When the user is done, answer briefly and naturally without reopening the conversation.
@@ -647,7 +650,7 @@ class GroqChat(commands.Cog):
             return fallback_context or "History channel tidak dapat dibaca karena permission atau error Discord."
 
         if not entries:
-            return "Tidak ada pesan yang cocok di history channel pada rentang waktu tersebut."
+            return f"HISTORY CHANNEL ({minutes} menit terakhir)\nTidak ada pesan yang cocok di rentang waktu tersebut."
 
         return f"HISTORY CHANNEL ({minutes} menit terakhir)\n" + "\n\n".join(entries)[-MAX_CHANNEL_CONTEXT_CHARS:]
 
@@ -1095,10 +1098,12 @@ class GroqChat(commands.Cog):
         has_mention: bool,
         is_replying_to_bot: bool,
     ) -> bool:
+        trimmed = content.strip()
+        starts_with_ferra_prefix = trimmed.lower().startswith("!ferra")
         return bool(
             is_replying_to_bot
             or has_mention
-
+            or starts_with_ferra_prefix
         )
 
     def _tool_definitions(self) -> list[dict]:
@@ -1107,7 +1112,11 @@ class GroqChat(commands.Cog):
                 "type": "function",
                 "function": {
                     "name": "search_web",
-                    "description": "Cari informasi terbaru atau fakta dari web untuk pertanyaan yang membutuhkan data terkini.",
+                    "description": (
+                        "Cari informasi web sebelum menjawab jika kamu tidak yakin dengan fakta, "
+                        "atau jika informasinya terbaru, spesifik, atau perlu diverifikasi. "
+                        "Jangan menebak; gunakan hasil untuk menjawab dengan akurat."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -1636,4 +1645,3 @@ async def teardown(bot: commands.Bot) -> None:
     cog = bot.get_cog("GroqChat")
     if cog is not None:
         cog.stop_proactive_scheduler()
-
